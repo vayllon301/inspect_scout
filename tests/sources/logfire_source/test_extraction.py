@@ -1,8 +1,10 @@
 """Tests for Logfire data extraction."""
 
+import json
 from typing import Any
 
 import pytest
+from inspect_ai.model import ChatMessageAssistant, ChatMessageTool, ContentImage
 from inspect_scout.sources._logfire.detection import Instrumentor
 from inspect_scout.sources._logfire.extraction import (
     extract_input_messages,
@@ -22,6 +24,140 @@ from .mocks import (
 
 class TestExtractInputMessages:
     """Tests for extract_input_messages function."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("instrumentor", "response_key"),
+        [
+            (Instrumentor.ANTHROPIC, "response"),
+            (Instrumentor.OPENAI, "response"),
+            (Instrumentor.OPENAI, "result"),
+        ],
+    )
+    async def test_extract_gen_ai_parts_with_tool_response(
+        self, instrumentor: Instrumentor, response_key: str
+    ) -> None:
+        span = {
+            "attributes": {
+                "request_data": {"model": "example-model"},
+                "gen_ai.input.messages": json.dumps(
+                    [
+                        {"role": "user", "content": "Weather in Paris?"},
+                        {
+                            "role": "assistant",
+                            "parts": [
+                                {"type": "text", "content": "Checking."},
+                                {
+                                    "type": "tool_call",
+                                    "id": "toolu_1",
+                                    "name": "get_weather",
+                                    "arguments": {"city": "Paris"},
+                                },
+                            ],
+                        },
+                        {
+                            "role": "tool",
+                            "parts": [
+                                {
+                                    "type": "tool_call_response",
+                                    "id": "toolu_1",
+                                    response_key: "Sunny",
+                                }
+                            ],
+                        },
+                    ]
+                ),
+            }
+        }
+
+        user, assistant, tool = await extract_input_messages(span, instrumentor)
+
+        assert user.role == "user"
+        assert user.text == "Weather in Paris?"
+        assert isinstance(assistant, ChatMessageAssistant)
+        assert assistant.text == "Checking."
+        assert assistant.tool_calls
+        [call] = assistant.tool_calls
+        assert (call.id, call.function, call.arguments) == (
+            "toolu_1",
+            "get_weather",
+            {"city": "Paris"},
+        )
+        assert isinstance(tool, ChatMessageTool)
+        assert tool.tool_call_id == call.id
+        assert tool.function == call.function
+        assert tool.text == "Sunny"
+
+    @pytest.mark.asyncio
+    async def test_extract_gen_ai_structured_anthropic_tool_response(self) -> None:
+        span = {
+            "attributes": {
+                "gen_ai.input.messages": [
+                    {
+                        "role": "tool",
+                        "parts": [
+                            {
+                                "type": "tool_call_response",
+                                "id": "toolu_1",
+                                "response": [
+                                    {"type": "text", "content": "Sunny"},
+                                    {
+                                        "type": "uri",
+                                        "modality": "image",
+                                        "uri": "https://example.test/weather.png",
+                                    },
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+        [tool] = await extract_input_messages(span, Instrumentor.ANTHROPIC)
+        assert isinstance(tool, ChatMessageTool)
+        assert tool.tool_call_id == "toolu_1"
+        assert tool.text == "Sunny"
+        assert isinstance(tool.content, list)
+        assert tool.content[1] == ContentImage(image="https://example.test/weather.png")
+
+    @pytest.mark.asyncio
+    async def test_extract_gen_ai_native_anthropic_blocks(self) -> None:
+        span = {
+            "attributes": {
+                "gen_ai.input.messages": [
+                    {
+                        "role": "assistant",
+                        "parts": [],
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "toolu_1",
+                                "name": "get_weather",
+                                "input": {"city": "Paris"},
+                            }
+                        ],
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "toolu_1",
+                                "content": "Sunny",
+                            }
+                        ],
+                    },
+                ]
+            }
+        }
+        assistant, tool = await extract_input_messages(span, Instrumentor.ANTHROPIC)
+
+        assert isinstance(assistant, ChatMessageAssistant)
+        assert assistant.tool_calls
+        assert assistant.tool_calls[0].id == "toolu_1"
+        assert isinstance(tool, ChatMessageTool)
+        assert tool.tool_call_id == "toolu_1"
+        assert tool.text == "Sunny"
 
     @pytest.mark.asyncio
     async def test_extract_from_events_openai(self) -> None:

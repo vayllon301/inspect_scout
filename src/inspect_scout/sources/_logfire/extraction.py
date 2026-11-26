@@ -95,17 +95,18 @@ async def extract_input_messages(
                 input_messages = None
 
         if isinstance(input_messages, list):
-            # Normalize Pydantic AI format with 'parts' to standard format
-            normalized = _normalize_pydantic_ai_messages(input_messages)
+            normalized = _normalize_pydantic_ai_messages(
+                input_messages, anthropic=instrumentor == Instrumentor.ANTHROPIC
+            )
             return await _convert_messages(normalized, instrumentor)
 
     return []
 
 
 def _normalize_pydantic_ai_messages(
-    messages: list[dict[str, Any]],
+    messages: list[dict[str, Any]], *, anthropic: bool = False
 ) -> list[dict[str, Any]]:
-    """Normalize Pydantic AI message format to standard OpenAI format.
+    """Normalize GenAI parts to provider message format.
 
     Pydantic AI stores messages as:
         {'role': 'system', 'parts': [{'type': 'text', 'content': '...'}]}
@@ -115,9 +116,10 @@ def _normalize_pydantic_ai_messages(
 
     Args:
         messages: Messages in Pydantic AI format
+        anthropic: Convert normalized messages to Anthropic blocks.
 
     Returns:
-        Normalized messages in OpenAI format
+        Normalized messages in OpenAI or Anthropic format.
     """
     normalized = []
 
@@ -137,7 +139,7 @@ def _normalize_pydantic_ai_messages(
         # Extract content from parts array
         if isinstance(parts, list):
             text_parts = []
-            tool_calls = []
+            tool_calls: list[dict[str, Any]] = []
 
             for part in parts:
                 if not isinstance(part, dict):
@@ -150,37 +152,36 @@ def _normalize_pydantic_ai_messages(
                     if text_content:
                         text_parts.append(text_content)
                 elif part_type == "tool_call":
-                    tool_calls.append(
-                        {
-                            "id": part.get("id", ""),
-                            "type": "function",
-                            "function": {
+                    if anthropic:
+                        tool_calls.append(
+                            {
+                                "type": "tool_use",
+                                "id": part.get("id", ""),
                                 "name": part.get("name", ""),
-                                "arguments": json.dumps(part.get("arguments", {})),
-                            },
-                        }
-                    )
-                elif part_type == "tool_result":
-                    # Tool result message
+                                "input": part.get("arguments") or {},
+                            }
+                        )
+                    else:
+                        tool_calls.append(
+                            {
+                                "id": part.get("id", ""),
+                                "type": "function",
+                                "function": {
+                                    "name": part.get("name", ""),
+                                    "arguments": json.dumps(part.get("arguments", {})),
+                                },
+                            }
+                        )
+                elif part_type in ("tool_result", "tool_call_response"):
+                    if part_type == "tool_result":
+                        call_id = part.get("tool_call_id", "")
+                        result = part.get("content", "")
+                    else:
+                        call_id = part.get("id", "")
+                        result = part.get("response", part.get("result", ""))
                     normalized.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": part.get("tool_call_id", ""),
-                            "content": str(part.get("content", "")),
-                        }
+                        _normalize_tool_result(call_id, result, anthropic=anthropic)
                     )
-                    continue
-                elif part_type == "tool_call_response":
-                    # Pydantic AI tool response format (different keys)
-                    # Has: id, name, result instead of tool_call_id, content
-                    normalized.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": part.get("id", ""),
-                            "content": str(part.get("result", "")),
-                        }
-                    )
-                    continue
 
             # Build the normalized message
             new_msg: dict[str, Any] = {"role": role}
@@ -189,7 +190,12 @@ def _normalize_pydantic_ai_messages(
             elif role == "assistant":
                 new_msg["content"] = ""  # Assistant can have empty content with tools
 
-            if tool_calls:
+            if tool_calls and anthropic:
+                new_msg["content"] = [
+                    *({"type": "text", "text": text} for text in text_parts),
+                    *tool_calls,
+                ]
+            elif tool_calls:
                 new_msg["tool_calls"] = tool_calls
 
             if new_msg.get("content") is not None or new_msg.get("tool_calls"):
@@ -199,6 +205,50 @@ def _normalize_pydantic_ai_messages(
             normalized.append(msg)
 
     return normalized
+
+
+def _normalize_tool_result(
+    call_id: str, content: Any, *, anthropic: bool
+) -> dict[str, Any]:
+    if anthropic:
+        result = (
+            [_anthropic_tool_result_block(part) for part in content]
+            if isinstance(content, list)
+            else str(content)
+        )
+        return {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": call_id, "content": result}
+            ],
+        }
+    return {"role": "tool", "tool_call_id": call_id, "content": str(content)}
+
+
+def _anthropic_tool_result_block(part: Any) -> dict[str, Any]:
+    if isinstance(part, dict):
+        part_type = part.get("type")
+        modality = part.get("modality")
+        if part_type == "text":
+            return {"type": "text", "text": part.get("content", part.get("text", ""))}
+        if part_type in ("image", "document"):
+            return part
+        if modality in ("image", "document"):
+            if part_type == "uri" and part.get("uri"):
+                return {
+                    "type": modality,
+                    "source": {"type": "url", "url": part["uri"]},
+                }
+            if part_type == "blob" and part.get("media_type") and "content" in part:
+                return {
+                    "type": modality,
+                    "source": {
+                        "type": "base64",
+                        "data": part["content"],
+                        "media_type": part["media_type"],
+                    },
+                }
+    return {"type": "text", "text": str(part)}
 
 
 def _extract_messages_from_events(
