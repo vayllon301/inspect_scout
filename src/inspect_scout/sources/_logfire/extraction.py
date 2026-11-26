@@ -212,7 +212,11 @@ def _normalize_tool_result(
 ) -> dict[str, Any]:
     if anthropic:
         result = (
-            [_anthropic_tool_result_block(part) for part in content]
+            [
+                block
+                for part in content
+                if (block := _anthropic_tool_result_block(part)) is not None
+            ]
             if isinstance(content, list)
             else str(content)
         )
@@ -225,14 +229,33 @@ def _normalize_tool_result(
     return {"role": "tool", "tool_call_id": call_id, "content": str(content)}
 
 
-def _anthropic_tool_result_block(part: Any) -> dict[str, Any]:
+def _anthropic_tool_result_block(part: Any) -> dict[str, Any] | None:
     if isinstance(part, dict):
         part_type = part.get("type")
         modality = part.get("modality")
         if part_type == "text":
             return {"type": "text", "text": part.get("content", part.get("text", ""))}
         if part_type in ("image", "document"):
-            return part
+            source = part.get("source")
+            # Anthropic tracing can record the media type without its payload.
+            if not isinstance(source, dict):
+                return None
+            source_type = source.get("type")
+            if source_type == "url" and source.get("url"):
+                return part
+            if (
+                source_type in ("base64", "text")
+                and source.get("media_type")
+                and isinstance(source.get("data"), str)
+                and (source_type == "base64" or part_type == "document")
+            ):
+                return part
+            if part_type == "document" and source_type == "content":
+                document_content = source.get("content")
+                if isinstance(document_content, str) or (
+                    isinstance(document_content, list) and document_content
+                ):
+                    return part
         if modality in ("image", "document"):
             if part_type == "uri" and part.get("uri"):
                 return {

@@ -4,7 +4,12 @@ import json
 from typing import Any
 
 import pytest
-from inspect_ai.model import ChatMessageAssistant, ChatMessageTool, ContentImage
+from inspect_ai.model import (
+    ChatMessageAssistant,
+    ChatMessageTool,
+    ContentDocument,
+    ContentImage,
+)
 from inspect_scout.sources._logfire.detection import Instrumentor
 from inspect_scout.sources._logfire.extraction import (
     extract_input_messages,
@@ -101,10 +106,20 @@ class TestExtractInputMessages:
                                 "id": "toolu_1",
                                 "response": [
                                     {"type": "text", "content": "Sunny"},
+                                    {"type": "image"},
+                                    {"type": "document"},
                                     {
                                         "type": "uri",
                                         "modality": "image",
                                         "uri": "https://example.test/weather.png",
+                                    },
+                                    {
+                                        "type": "document",
+                                        "source": {
+                                            "type": "text",
+                                            "media_type": "text/plain",
+                                            "data": "Forecast",
+                                        },
                                     },
                                 ],
                             }
@@ -119,6 +134,9 @@ class TestExtractInputMessages:
         assert tool.text == "Sunny"
         assert isinstance(tool.content, list)
         assert tool.content[1] == ContentImage(image="https://example.test/weather.png")
+        assert tool.content[2] == ContentDocument(
+            document="data:text/plain;base64,Rm9yZWNhc3Q=", mime_type="text/plain"
+        )
 
     @pytest.mark.asyncio
     async def test_extract_gen_ai_native_anthropic_blocks(self) -> None:
