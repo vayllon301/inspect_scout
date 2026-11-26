@@ -116,11 +116,13 @@ class SampleMetadata:
     def target(self) -> list[str]:
         """Sample target value(s). Derived from EvalSampleSummary.target.
 
-        Stored as comma-separated string; parsed back to list.
+        Full samples can provide a list. The transcript index stores a comma-separated string.
         """
         target = self._metadata["target"]
         if not target:
             return []
+        if isinstance(target, list):
+            return list(target)
         return [t.strip() for t in target.split(",") if t.strip()]
 
     @property

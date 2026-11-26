@@ -3,7 +3,10 @@
 from pathlib import Path
 
 import pytest
+from inspect_ai import Task, eval_async
+from inspect_ai.dataset import Sample
 from inspect_ai.log import read_eval_log, write_eval_log
+from inspect_scout import SampleMetadata
 from inspect_scout._transcript.eval_log import EvalLogTranscriptsView
 from inspect_scout._transcript.types import (
     Transcript,
@@ -41,6 +44,24 @@ async def _read_first_transcript(
         async for info in view.select():
             return await view.read(info, content, max_bytes)
     raise AssertionError("No transcripts found")
+
+
+@pytest.mark.asyncio
+async def test_sample_metadata_target_from_eval_log(tmp_path: Path) -> None:
+    [log] = await eval_async(
+        Task(dataset=[Sample(input="Name two colours.", target=["red", "blue"])]),
+        model="mockllm/model",
+        log_dir=str(tmp_path),
+    )
+    assert log.status == "success"
+    assert log.location is not None
+
+    full = await _read_first_transcript(Path(log.location), TranscriptContent())
+    index_only = await _read_first_transcript(
+        Path(log.location), TranscriptContent(metadata=False)
+    )
+    assert SampleMetadata(full).target == ["red", "blue"]
+    assert SampleMetadata(index_only).target == ["red", "blue"]
 
 
 @pytest.mark.asyncio
